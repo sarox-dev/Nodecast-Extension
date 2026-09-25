@@ -27,13 +27,16 @@ chrome.runtime.onInstalled.addListener(() => {
     });
   });
   // Set defaults if first install
-  chrome.storage.sync.get(['apiUrl'], (r) => {
+  chrome.storage.sync.get(['apiUrl', 'shortcutKey'], (r) => {
     if (!r.apiUrl) {
       chrome.storage.sync.set({
         apiUrl: DEFAULT_API_URL,
         autoSaveOnSelect: false,
-        shortcutKey: 'Alt+Shift+R'
+        shortcutKey: 'Alt+Shift+S'
       });
+    } else if (!r.shortcutKey || r.shortcutKey === 'Alt+Shift+R') {
+      // Older releases used R for both save-selection and open-nodecast.
+      chrome.storage.sync.set({ shortcutKey: 'Alt+Shift+S' });
     }
   });
 });
@@ -107,20 +110,13 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // From content.js — save Capture Package
   if (request.action === 'saveCapturePackage' && request.package) {
-    let tabId = sender.tab?.id;
-    // Fallback: try to find active tab
-    if (!tabId) {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) {
-          sendCapturePackage(request.package, tabs[0].id);
-        } else {
-          sendCapturePackage(request.package, null);
-        }
-      });
-    } else {
-      sendCapturePackage(request.package, tabId);
-    }
-    sendResponse({ success: true });
+    const finish = (tabId) => {
+      sendCapturePackage(request.package, tabId)
+        .then(sendResponse)
+        .catch(error => sendResponse({ success: false, message: error.message }));
+    };
+    if (sender.tab?.id) finish(sender.tab.id);
+    else chrome.tabs.query({ active: true, currentWindow: true }, tabs => finish(tabs[0]?.id || null));
     return true;
   }
 
@@ -150,19 +146,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const captureType = request.captureType || 'page';
     if (tab && tab.id) {
       chrome.tabs.sendMessage(tab.id, { action: 'buildCapturePackage', captureType: captureType }, (response) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ success: false, message: chrome.runtime.lastError.message });
+          return;
+        }
         if (response && response.package) {
-          sendCapturePackage(response.package, tab.id);
+          sendCapturePackage(response.package, tab.id).then(sendResponse);
+        } else {
+          sendResponse({ success: false, message: 'Could not build capture package' });
         }
       });
+      return true;
     }
-    sendResponse({ success: true });
-    return true;
+    sendResponse({ success: false, message: 'No active tab' });
+    return false;
   }
 
   // From popup — get layout info for current tab
   if (request.action === 'getLayout') {
     chrome.tabs.sendMessage(sender.tab?.id || request.tab?.id, { action: 'getLayout' }, (response) => {
       sendResponse(response?.layout || null);
+    });
+    return true;
+  }
+
+  // From content.js — fetch layout (routed through background to avoid mixed content blocking)
+  if (request.action === 'fetchLayout' && request.url) {
+    chrome.storage.sync.get(['apiUrl'], (s) => {
+      const baseUrl = (s.apiUrl || DEFAULT_API_URL)
+        .replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
+      const checkUrl = `${baseUrl}/api/layouts/check?url=${encodeURIComponent(request.url)}`;
+      fetch(checkUrl)
+        .then(res => res.json())
+        .then(data => sendResponse({ layout: data }))
+        .catch(() => sendResponse({ layout: { matched: false, capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }] } }));
     });
     return true;
   }
@@ -180,48 +197,52 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 // --- Send Capture Package to API ---
-function sendCapturePackage(pkg, tabId) {
-  chrome.storage.sync.get(['apiUrl', 'apiToken'], (settings) => {
-    const apiUrl = settings.apiUrl || DEFAULT_API_URL;
+async function sendCapturePackage(pkg, tabId) {
+  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  const apiUrl = (settings.apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
+  const headers = { 'Content-Type': 'application/json' };
+  if (settings.apiToken) headers.Authorization = `Bearer ${settings.apiToken}`;
 
-    const headers = { 'Content-Type': 'application/json' };
-    if (settings.apiToken) {
-      headers['Authorization'] = 'Bearer ' + settings.apiToken;
+  try {
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(pkg)
+    });
+    const raw = await response.text();
+    let data = {};
+    try { data = raw ? JSON.parse(raw) : {}; } catch { data = { detail: raw }; }
+
+    if (!response.ok || !data.success) {
+      const detail = typeof data.detail === 'string'
+        ? data.detail
+        : JSON.stringify(data.detail || data || {});
+      const message = response.status === 401
+        ? 'Token expired — open Nodecast settings and get a new token'
+        : `Save failed (${response.status}): ${detail || response.statusText}`;
+      console.error('Nodecast API error:', { status: response.status, detail, data });
+      showToast(tabId, message, true);
+      return { success: false, status: response.status, message, data };
     }
 
-    fetch(apiUrl, {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify(pkg)
-    })
-    .then(res => res.json())
-    .then(data => {
-      if (data.success) {
-        // Store in local history
-        chrome.storage.local.get({ highlights: [] }, (result) => {
-          const entry = {
-            id: data.id,
-            type: pkg.capture_type || 'page',
-            title: pkg.source?.title || '',
-            url: pkg.source?.url || '',
-            date: new Date().toISOString().split('T')[0],
-            text: pkg.anchor?.selected_text?.substring(0, 100) || ''
-          };
-          const highlights = [entry, ...result.highlights].slice(0, 100);
-          chrome.storage.local.set({ highlights });
-        });
-        showToast(tabId, 'Saved to Nodecast', false);
-        console.log('Nodecast: saved', data.id);
-      } else {
-        console.error('Nodecast API error:', data);
-        showToast(tabId, 'Save failed', true);
-      }
-    })
-    .catch(err => {
-      console.error('Nodecast API unavailable:', err);
-      showToast(tabId, 'Nodecast server unavailable', true);
-    });
-  });
+    const result = await chrome.storage.local.get({ highlights: [] });
+    const entry = {
+      id: data.id,
+      type: pkg.capture_type || 'page',
+      title: pkg.source?.title || '',
+      url: pkg.source?.url || '',
+      date: new Date().toISOString().split('T')[0],
+      text: pkg.anchor?.selected_text?.substring(0, 100) || ''
+    };
+    await chrome.storage.local.set({ highlights: [entry, ...result.highlights].slice(0, 100) });
+    showToast(tabId, data.message || 'Saved to Nodecast', false);
+    console.info('Nodecast capture saved:', { id: data.id, type: entry.type, url: entry.url });
+    return data;
+  } catch (error) {
+    console.error('Nodecast API unavailable:', error);
+    showToast(tabId, `Nodecast unavailable: ${error.message}`, true);
+    return { success: false, message: error.message };
+  }
 }
 
 // --- Fallback: basic text-only capture ---

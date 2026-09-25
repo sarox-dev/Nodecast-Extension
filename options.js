@@ -63,8 +63,8 @@ function testApiConnection() {
 
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = 'Bearer ' + token;
-  // Use /auth/check to test connection (doesn't need auth, but if token provided, use it)
-  const testUrl = getBaseUrl() + '/auth/check';
+  // With a token, verify authentication instead of only checking server reachability.
+  const testUrl = getBaseUrl() + (token ? '/auth/me' : '/auth/check');
   fetch(testUrl, { headers, credentials: 'include' })
     .then(res => {
       if (res.ok) {
@@ -113,7 +113,8 @@ if (generateTokenBtn) {
     .then(data => {
       if (data.token) {
         apiTokenInput.value = data.token;
-        tokenGenResult.textContent = 'Token generated ✓';
+        chrome.storage.sync.set({ apiToken: data.token });
+        tokenGenResult.textContent = 'Token generated and saved ✓';
         tokenGenResult.className = 'test-result success';
         tokenPassword.value = '';
         tokenLoginSection.style.display = 'none';

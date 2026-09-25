@@ -71,25 +71,20 @@ newProjectBtn.addEventListener('click', () => {
 saveSelectionBtn.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (!tabs[0]) return;
-    chrome.tabs.sendMessage(tabs[0].id, { action: 'captureWithContext' }, (response) => {
-      if (chrome.runtime.lastError || !response || !response.fullData) {
+    chrome.tabs.sendMessage(tabs[0].id, {
+      action: 'buildCapturePackage',
+      captureType: 'snippet'
+    }, (response) => {
+      if (chrome.runtime.lastError || !response?.package?.anchor?.selected_text) {
         showGlow('No text selected', true);
         return;
       }
-      const data = response.fullData;
       chrome.runtime.sendMessage({
-        action: 'saveCurrentSelection',
-        text: data.content,
-        tab: { title: data.pageTitle, url: data.pageUrl },
-        siteName: data.siteName,
-        beforeText: data.beforeText,
-        afterText: data.afterText,
-        selectionHtml: data.selectionHtml,
-        selectedTagName: data.selectedTagName,
-        selectedTagsAncestry: data.selectedTagsAncestry
+        action: 'saveCapturePackage',
+        package: response.package
       }, (res) => {
         if (res && res.success) {
-          showGlow('Saved to Nodecast');
+          showGlow(res.message || 'Saved to Nodecast');
         } else {
           showGlow(res?.message || 'Save failed', true);
         }

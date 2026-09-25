@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Nodecast",
   "short_name": "Nodecast",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Save highlighted text from websites to your local Nodecast knowledge base.",
   "permissions": [
     "storage",
@@ -12,7 +12,9 @@
   ],
   "host_permissions": [
     "http://localhost/*",
-    "https://localhost/*"
+    "https://localhost/*",
+    "http://0.0.0.0/*",
+    "http://127.0.0.1/*"
   ],
   "action": {
     "default_popup": "popup.html",

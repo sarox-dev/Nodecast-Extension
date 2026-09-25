@@ -26,7 +26,7 @@ No tracking. Local-first. Your data stays on your machine.
 ## Features
 - **Save highlights** — Select text and save directly to Nodecast
 - **Markdown storage** — Highlights are saved as standard Markdown files.
-- **Keyboard shortcut** — `Alt+Shift+R` to save without leaving your flow
+- **Keyboard shortcut** — `Alt+Shift+S` to save selected text without leaving your flow
 - **Context menu** — Right-click any selection and choose "Save highlight to Nodecast"
 - **Quick stats** — Popup shows how many highlights you've saved
 - **Organized** — Each save includes source URL, page title, timestamp, and domain
@@ -83,7 +83,7 @@ Markdown Knowledge Base
 
 **Method 1 — Keyboard shortcut:**
 1. Select text on any webpage
-2. Press `Alt+Shift+R`
+2. Press `Alt+Shift+S`
 3. A confirmation notification appears
 
 **Method 2 — Context menu:**
@@ -131,7 +131,9 @@ Compatible with Obsidian, VS Code, and any markdown editor.
 
 | Shortcut | Action |
 |---|---|
-| `Alt+Shift+R` | Save selected text to Nodecast |
+| `Alt+Shift+S` | Save selected text to Nodecast |
+| `Alt+Shift+P` | Save the current page to Nodecast |
+| `Alt+Shift+R` | Open Nodecast |
 | Click extension icon | Open popup with stats |
 
 To customize shortcuts: `chrome://extensions/shortcuts`

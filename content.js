@@ -14,28 +14,20 @@ sentinel.name = 'nodecast-extension';
 sentinel.content = 'installed';
 document.head.appendChild(sentinel);
 
-// --- Fetch layout from backend ---
+// --- Fetch layout from backend (routed through background to avoid mixed content) ---
 function fetchLayout() {
   if (layoutFetched) return;
   layoutFetched = true;
 
-  chrome.storage.sync.get(['apiUrl'], (settings) => {
-    const baseUrl = (settings.apiUrl || 'http://localhost:5000/api/capture')
-      .replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
-    const checkUrl = `${baseUrl}/api/layouts/check?url=${encodeURIComponent(window.location.href)}`;
-
-    fetch(checkUrl)
-      .then(res => res.json())
-      .then(data => {
-        pageLayout = data;
-      })
-      .catch(() => {
-        // Backend not available — use defaults
-        pageLayout = {
-          matched: false,
-          capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }]
-        };
-      });
+  chrome.runtime.sendMessage({ action: 'fetchLayout', url: window.location.href }, (response) => {
+    if (chrome.runtime.lastError || !response) {
+      pageLayout = {
+        matched: false,
+        capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }]
+      };
+      return;
+    }
+    pageLayout = response.layout;
   });
 }
 
@@ -94,23 +86,16 @@ fetchLayout = function() {
   if (layoutFetched) return;
   layoutFetched = true;
 
-  chrome.storage.sync.get(['apiUrl'], (settings) => {
-    const baseUrl = (settings.apiUrl || 'http://localhost:5000/api/capture')
-      .replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
-    const checkUrl = `${baseUrl}/api/layouts/check?url=${encodeURIComponent(window.location.href)}`;
-
-    fetch(checkUrl)
-      .then(res => res.json())
-      .then(data => {
-        pageLayout = data;
-        injectSaveButtons(data);  // NEW: inject buttons
-      })
-      .catch(() => {
-        pageLayout = {
-          matched: false,
-          capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }]
-        };
-      });
+  chrome.runtime.sendMessage({ action: 'fetchLayout', url: window.location.href }, (response) => {
+    if (chrome.runtime.lastError || !response) {
+      pageLayout = {
+        matched: false,
+        capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }]
+      };
+      return;
+    }
+    pageLayout = response.layout;
+    injectSaveButtons(response.layout);  // NEW: inject buttons
   });
 };
 
@@ -483,37 +468,19 @@ document.addEventListener('mouseup', () => {
 });
 
 // --- Keyboard shortcut listener ---
+// Build the package synchronously while the browser selection is still alive.
+// Capture phase also prevents page-level shortcut handlers from swallowing it.
 document.addEventListener('keydown', (event) => {
-  try {
-    chrome.storage.sync.get(['shortcutKey'], (settings) => {
-      const shortcut = settings.shortcutKey || 'Alt+Shift+R';
-      const parts = shortcut.split('+');
-      const key = parts.pop().toLowerCase();
-      const needsCtrl = parts.includes('Ctrl');
-      const needsAlt = parts.includes('Alt');
-      const needsShift = parts.includes('Shift');
-      const needsMeta = parts.includes('Meta');
+  if (!(event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyS')) return;
 
-      const ctrlOrCmd = event.ctrlKey || event.metaKey;
-      const matchCtrl = needsCtrl ? ctrlOrCmd : !ctrlOrCmd && !needsMeta;
-      const matchMeta = needsMeta ? event.metaKey : true;
-      const matchAlt = needsAlt ? event.altKey : !event.altKey;
-      const matchShift = needsShift ? event.shiftKey : !event.shiftKey;
-      const matchKey = event.key.toLowerCase() === key;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const text = window.getSelection().toString().trim();
+  if (!text) {
+    showGlow('Select text first', true);
+    return;
+  }
 
-      if (matchCtrl && matchAlt && matchShift && matchMeta && matchKey) {
-        event.preventDefault();
-        const text = window.getSelection().toString().trim();
-        if (!text) {
-          showGlow('Select text first', true);
-          return;
-        }
-        const pkg = buildCapturePackage('snippet');
-        chrome.runtime.sendMessage({
-          action: 'saveCapturePackage',
-          package: pkg
-        });
-      }
-    });
-  } catch (e) {}
-});
+  const pkg = buildCapturePackage('snippet');
+  chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: pkg });
+}, true);
