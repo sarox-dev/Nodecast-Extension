@@ -46,13 +46,23 @@ A running Nodecast server is required.
    git clone https://github.com/sarox-dev/Nodecast-Extension.git
    ```
 
-2. **Open Chrome** and go to `chrome://extensions`
+2. **Chromium:** open `chrome://extensions`
 
 3. **Enable Developer mode** (toggle in top right)
 
 4. **Click "Load unpacked"** and select the `Nodecast-Extension` folder
 
 5. The extension icon appears in your toolbar, pin it for easy access.
+
+### Firefox / LibreWolf
+
+```bash
+./build-firefox.sh
+```
+
+Open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select
+`dist/firefox/manifest.json`. The Firefox package uses the same application code and a Firefox-specific
+MV3 background declaration; captures, pairing, floating Save, shortcuts, and the context menu remain shared.
 
 ### From Chrome Web Store
 
@@ -171,9 +181,8 @@ No build step required — the extension uses vanilla JavaScript, HTML, and CSS.
 
 ## Requirements
 
-- **Chrome** (version 88+) or any Chromium-based browser (Edge, Brave, Opera)
+- **Chrome** (version 88+), Chromium-based browsers, Firefox, or LibreWolf
 - **Nodecast server** running at `http://localhost:5000` ([setup guide](https://github.com/sarox-dev/Nodecast))
-- Firefox support is planned.
 ---
 
 ## License
@@ -190,7 +199,7 @@ Commercial licenses for proprietary use are available from the author.
 
 ### Upcoming
 
-- Firefox support
+- Signed Firefox/LibreWolf store distribution
 - Chrome Web Store release
 - Tags
 - Screenshots

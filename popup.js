@@ -118,7 +118,12 @@ openNodecastBtn.addEventListener('click', () => {
 
 // --- Settings ---
 settingsBtn.addEventListener('click', () => {
-  chrome.runtime.openOptionsPage();
+  chrome.storage.sync.get(['apiUrl'], (settings) => {
+    const origin = (settings.apiUrl || 'http://localhost:5000/api/capture')
+      .replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
+    chrome.tabs.create({ url: `${origin}/?settings=extension` });
+    window.close();
+  });
 });
 
 // --- Glow notification (in-page overlay) ---

@@ -14,6 +14,38 @@ sentinel.name = 'nodecast-extension';
 sentinel.content = 'installed';
 document.head.appendChild(sentinel);
 
+// --- Core page bridge ---
+// Only Nodecast's loopback workspace can request pairing. Tokens stay in the service worker.
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const message = event.data;
+  if (!message || message.source !== 'nodecast-core') return;
+  const isCorePage = Boolean(document.querySelector('meta[name="nodecast-core"]'));
+  const isLoopback = ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
+  if (!isCorePage || !isLoopback) return;
+
+  const respond = (payload) => window.postMessage({
+    source: 'nodecast-extension',
+    type: 'NODECAST_EXTENSION_STATUS',
+    requestId: message.requestId,
+    payload
+  }, window.location.origin);
+
+  if (message.type === 'NODECAST_EXTENSION_PING') {
+    chrome.runtime.sendMessage({ action: 'getExtensionStatus' }, response => {
+      respond(response || { detected: true, connected: false, version: chrome.runtime.getManifest().version });
+    });
+  } else if (message.type === 'NODECAST_EXTENSION_PAIR') {
+    chrome.runtime.sendMessage({
+      action: 'pairWithCore', code: message.payload?.code, coreOrigin: message.payload?.coreOrigin
+    }, response => respond(response || { success: false, message: 'Pairing failed' }));
+  } else if (message.type === 'NODECAST_EXTENSION_SYNC_SETTINGS') {
+    chrome.runtime.sendMessage({ action: 'syncExtensionSettings' }, response => respond(response || { success: false }));
+  } else if (message.type === 'NODECAST_EXTENSION_DISCONNECT') {
+    chrome.runtime.sendMessage({ action: 'disconnectCore' }, response => respond(response || { success: false }));
+  }
+});
+
 // --- Fetch layout from backend (routed through background to avoid mixed content) ---
 function fetchLayout() {
   if (layoutFetched) return;
@@ -444,28 +476,90 @@ function showGlow(message, isError) {
   });
 }
 
-// --- Auto-save on selection (if enabled) ---
-let autoSaveTimer = null;
+// --- Floating Save button (primary selection flow) ---
+let floatingHost = null;
+let floatingPackage = null;
 
-document.addEventListener('mouseup', () => {
-  try {
-    chrome.storage.sync.get(['autoSaveOnSelect'], (settings) => {
-      if (!settings.autoSaveOnSelect) return;
-      const text = window.getSelection().toString().trim();
-      if (text.length < 10) return;
+function removeFloatingSave() {
+  floatingHost?.remove();
+  floatingHost = null;
+  floatingPackage = null;
+}
 
-      clearTimeout(autoSaveTimer);
-      autoSaveTimer = setTimeout(() => {
-        const pkg = buildCapturePackage('snippet');
-        if (!pkg || !pkg.anchor) return;
-        chrome.runtime.sendMessage({
-          action: 'saveCapturePackage',
-          package: pkg
-        });
-      }, 600);
+function selectionIsEditable(selection) {
+  const node = selection?.anchorNode;
+  const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  return Boolean(element?.closest('input, textarea, [contenteditable="true"], [contenteditable="plaintext-only"]'));
+}
+
+function showFloatingSave(range, pkg) {
+  removeFloatingSave();
+  const rect = range.getBoundingClientRect();
+  if (!rect || (!rect.width && !rect.height)) return;
+  floatingPackage = pkg;
+  floatingHost = document.createElement('div');
+  floatingHost.id = 'nodecast-floating-save-host';
+  Object.assign(floatingHost.style, { position: 'fixed', zIndex: '2147483647', left: '0', top: '0' });
+  const shadow = floatingHost.attachShadow({ mode: 'closed' });
+  shadow.innerHTML = `<style>
+    button{all:initial;box-sizing:border-box;display:flex;align-items:center;gap:7px;padding:8px 12px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:#111827;color:#f8fafc;box-shadow:0 8px 28px rgba(0,0,0,.34);font:600 13px/1 system-ui,-apple-system,sans-serif;cursor:pointer;user-select:none;transition:transform .15s ease,background .15s ease}
+    button:hover{background:#1f2937;transform:translateY(-1px)}button:disabled{cursor:default;opacity:.9;transform:none}.mark{color:#60a5fa;font-size:15px}.success{background:#047857}.error{background:#b91c1c}
+  </style><button type="button" aria-label="Save selection to Nodecast"><span class="mark">◆</span><span class="label">Save</span></button>`;
+  const button = shadow.querySelector('button');
+  button.addEventListener('mousedown', event => event.preventDefault());
+  button.addEventListener('click', () => {
+    if (!floatingPackage) return;
+    button.disabled = true;
+    shadow.querySelector('.label').textContent = 'Saving…';
+    chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: floatingPackage }, response => {
+      if (chrome.runtime.lastError || !response?.success) {
+        button.classList.add('error');
+        shadow.querySelector('.label').textContent = 'Save failed';
+      } else {
+        button.classList.add('success');
+        shadow.querySelector('.label').textContent = 'Saved';
+      }
+      setTimeout(removeFloatingSave, response?.success ? 900 : 1800);
     });
-  } catch (e) {}
+  });
+  document.documentElement.appendChild(floatingHost);
+  const buttonRect = floatingHost.getBoundingClientRect();
+  const width = Math.max(buttonRect.width, 82);
+  const left = Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - 8);
+  const preferredTop = rect.top - 44;
+  const top = preferredTop >= 8 ? preferredTop : Math.min(window.innerHeight - 42, rect.bottom + 8);
+  floatingHost.style.left = `${left}px`;
+  floatingHost.style.top = `${top}px`;
+}
+
+function prepareFloatingSave() {
+  if (document.querySelector('meta[name="nodecast-core"]')) return removeFloatingSave();
+  const selection = window.getSelection();
+  const text = selection?.toString().trim() || '';
+  if (!selection?.rangeCount || selectionIsEditable(selection)) return removeFloatingSave();
+  const range = selection.getRangeAt(0).cloneRange();
+  const pkg = buildCapturePackage('snippet');
+  if (!pkg?.anchor) return removeFloatingSave();
+  chrome.storage.sync.get(['floatingButtonEnabled', 'minSelectionLength', 'defaultProject'], settings => {
+    if (settings.floatingButtonEnabled === false || text.length < (settings.minSelectionLength || 10)) return removeFloatingSave();
+    pkg.project = settings.defaultProject || '';
+    showFloatingSave(range, pkg);
+  });
+}
+
+document.addEventListener('mouseup', event => {
+  if (floatingHost && event.composedPath().includes(floatingHost)) return;
+  setTimeout(prepareFloatingSave, 20);
 });
+document.addEventListener('keyup', event => {
+  if (event.key === 'Escape') return removeFloatingSave();
+  if (event.shiftKey || event.key.startsWith('Arrow')) setTimeout(prepareFloatingSave, 20);
+});
+document.addEventListener('mousedown', event => {
+  if (floatingHost && !event.composedPath().includes(floatingHost)) removeFloatingSave();
+});
+window.addEventListener('scroll', removeFloatingSave, true);
+window.addEventListener('resize', removeFloatingSave);
 
 // --- Keyboard shortcut listener ---
 // Build the package synchronously while the browser selection is still alive.
@@ -482,5 +576,8 @@ document.addEventListener('keydown', (event) => {
   }
 
   const pkg = buildCapturePackage('snippet');
-  chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: pkg });
+  chrome.storage.sync.get(['defaultProject'], settings => {
+    pkg.project = settings.defaultProject || '';
+    chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: pkg });
+  });
 }, true);

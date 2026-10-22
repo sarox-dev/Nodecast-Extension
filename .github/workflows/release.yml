@@ -54,6 +54,12 @@ jobs:
             -x "nodecast-logo.png" \
             -x "*.md"
 
+      - name: Package Firefox extension
+        shell: bash
+        run: |
+          ./build-firefox.sh
+          (cd dist/firefox && zip -r ../nodecast-extension-firefox.zip .)
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -65,7 +71,7 @@ jobs:
 
             ## Installation
 
-            1. Download `nodecast-extension.zip` from this release
+            1. Download `nodecast-extension.zip` for Chromium, or `nodecast-extension-firefox.zip` for Firefox/LibreWolf
             2. Unzip the file
             3. Open Chrome/Edge and go to `chrome://extensions/`
             4. Enable **Developer mode** (toggle in top-right)
@@ -83,6 +89,7 @@ jobs:
 
           files: |
             dist/nodecast-extension.zip
+            dist/nodecast-extension-firefox.zip
 
           overwrite_files: true
           draft: false

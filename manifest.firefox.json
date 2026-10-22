@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Nodecast",
+  "short_name": "Nodecast",
+  "version": "1.2.0",
+  "description": "Save highlighted text from websites to your local Nodecast knowledge base.",
+  "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
+  "host_permissions": [
+    "http://localhost/*",
+    "https://localhost/*",
+    "http://0.0.0.0/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {"default_popup": "popup.html", "default_title": "Nodecast"},
+  "background": {"scripts": ["background.js"]},
+  "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"]}],
+  "commands": {
+    "save-selection": {"suggested_key": {"default": "Alt+Shift+S"}, "description": "Save selected text to Nodecast"},
+    "save-page": {"suggested_key": {"default": "Alt+Shift+P"}, "description": "Save current page to Nodecast"},
+    "open-nodecast": {"suggested_key": {"default": "Alt+Shift+R"}, "description": "Open Nodecast in new tab"}
+  },
+  "icons": {
+    "16": "icons/nodecast-icon.png", "32": "icons/nodecast-icon.png",
+    "48": "icons/nodecast-icon.png", "128": "icons/nodecast-icon.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nodecast@nodecast.dev",
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {"required": ["none"]}
+    }
+  }
+}

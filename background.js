@@ -31,7 +31,8 @@ chrome.runtime.onInstalled.addListener(() => {
     if (!r.apiUrl) {
       chrome.storage.sync.set({
         apiUrl: DEFAULT_API_URL,
-        autoSaveOnSelect: false,
+        floatingButtonEnabled: true,
+        minSelectionLength: 10,
         shortcutKey: 'Alt+Shift+S'
       });
     } else if (!r.shortcutKey || r.shortcutKey === 'Alt+Shift+R') {
@@ -108,6 +109,34 @@ chrome.commands.onCommand.addListener((command) => {
 
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getExtensionStatus') {
+    chrome.storage.sync.get(['apiToken', 'pairedUsername'], (settings) => {
+      sendResponse({
+        detected: true,
+        connected: Boolean(settings.apiToken),
+        username: settings.pairedUsername || '',
+        version: chrome.runtime.getManifest().version,
+        capabilities: ['pairing', 'settings-sync', 'floating-save', 'shortcut', 'context-menu']
+      });
+    });
+    return true;
+  }
+
+  if (request.action === 'pairWithCore') {
+    pairWithCore(request.coreOrigin, request.code).then(sendResponse);
+    return true;
+  }
+
+  if (request.action === 'syncExtensionSettings') {
+    syncExtensionSettings().then(sendResponse);
+    return true;
+  }
+
+  if (request.action === 'disconnectCore') {
+    chrome.storage.sync.remove(['apiToken', 'pairedUsername', 'pairedUserId'], () => sendResponse({ success: true }));
+    return true;
+  }
+
   // From content.js — save Capture Package
   if (request.action === 'saveCapturePackage' && request.package) {
     const finish = (tabId) => {
@@ -196,12 +225,69 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+function isAllowedCoreOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return ['http:', 'https:'].includes(url.protocol)
+      && ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function pairWithCore(coreOrigin, code) {
+  if (!isAllowedCoreOrigin(coreOrigin)) return { success: false, message: 'Unsupported Nodecast Core address' };
+  try {
+    const response = await fetch(`${coreOrigin}/api/extension/exchange`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.token) return { success: false, message: data.detail || 'Pairing failed' };
+    await chrome.storage.sync.set({
+      apiUrl: `${coreOrigin}/api/capture`,
+      apiToken: data.token,
+      pairedUsername: data.username,
+      pairedUserId: data.user_id
+    });
+    const synced = await syncExtensionSettings();
+    if (!synced.success) return synced;
+    return { success: true, username: data.username };
+  } catch (error) {
+    return { success: false, message: `Could not reach Nodecast: ${error.message}` };
+  }
+}
+
+async function syncExtensionSettings() {
+  const stored = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  if (!stored.apiToken) return { success: false, message: 'Extension is not connected' };
+  const origin = (stored.apiUrl || DEFAULT_API_URL).replace(/\/api\/capture.*$/, '').replace(/\/api$/, '');
+  try {
+    const response = await fetch(`${origin}/api/extension/settings`, {
+      headers: { Authorization: `Bearer ${stored.apiToken}` }
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, message: data.detail || 'Settings sync failed' };
+    const settings = data.settings || {};
+    await chrome.storage.sync.set({
+      floatingButtonEnabled: settings.floating_button_enabled !== false,
+      minSelectionLength: settings.min_selection_length || 10,
+      glowPosition: settings.notification_position || 'top-center',
+      defaultProject: settings.default_project || '',
+      pairedUsername: data.username || ''
+    });
+    return { success: true, settings };
+  } catch (error) {
+    return { success: false, message: `Settings sync failed: ${error.message}` };
+  }
+}
+
 // --- Send Capture Package to API ---
 async function sendCapturePackage(pkg, tabId) {
-  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken', 'defaultProject']);
   const apiUrl = (settings.apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
   const headers = { 'Content-Type': 'application/json' };
   if (settings.apiToken) headers.Authorization = `Bearer ${settings.apiToken}`;
+  if (!pkg.project && settings.defaultProject) pkg.project = settings.defaultProject;
 
   try {
     const response = await fetch(apiUrl, {
