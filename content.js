@@ -3,6 +3,39 @@
 // Supports Capture Layout — domain-specific buttons and selectors
 
 const CONTEXT_CHARS = 1500;
+const extensionVersion = chrome.runtime.getManifest().version;
+
+function extensionAvailable() {
+  try { return Boolean(chrome.runtime?.id); } catch { return false; }
+}
+
+function sendRuntime(message, callback = () => {}) {
+  try {
+    if (!extensionAvailable()) { callback(null); return; }
+    chrome.runtime.sendMessage(message, response => {
+      const error = chrome.runtime.lastError;
+      callback(error ? null : response);
+    });
+  } catch { callback(null); }
+}
+
+function readExtensionSettings(keys, callback) {
+  try {
+    if (!extensionAvailable()) { callback(null); return; }
+    chrome.storage.sync.get(keys, settings => {
+      const error = chrome.runtime.lastError;
+      callback(error ? null : settings);
+    });
+  } catch { callback(null); }
+}
+
+function notifyReloadRequired() {
+  const notice = document.createElement('div');
+  notice.textContent = 'Nodecast extension was reloaded. Refresh this page to use Save.';
+  Object.assign(notice.style, {position:'fixed',right:'16px',bottom:'16px',zIndex:'2147483647',padding:'12px',borderRadius:'8px',background:'#20242c',color:'#fff',font:'14px system-ui,sans-serif'});
+  document.body?.appendChild(notice);
+  setTimeout(() => notice.remove(), 6000);
+}
 
 // --- Layout cache (fetched from backend on page load) ---
 let pageLayout = null;
@@ -21,8 +54,10 @@ window.addEventListener('message', (event) => {
   const message = event.data;
   if (!message || message.source !== 'nodecast-core') return;
   const isCorePage = Boolean(document.querySelector('meta[name="nodecast-core"]'));
-  const isLoopback = ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
-  if (!isCorePage || !isLoopback) return;
+  const host = window.location.hostname;
+  const isPrivateIpv4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+  const isLocalCore = ['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host) || isPrivateIpv4;
+  if (!isCorePage || !isLocalCore) return;
 
   const respond = (payload) => window.postMessage({
     source: 'nodecast-extension',
@@ -32,17 +67,17 @@ window.addEventListener('message', (event) => {
   }, window.location.origin);
 
   if (message.type === 'NODECAST_EXTENSION_PING') {
-    chrome.runtime.sendMessage({ action: 'getExtensionStatus' }, response => {
-      respond(response || { detected: true, connected: false, version: chrome.runtime.getManifest().version });
+    sendRuntime({ action: 'getExtensionStatus' }, response => {
+      respond(response || { detected: false, connected: false, version: extensionVersion });
     });
   } else if (message.type === 'NODECAST_EXTENSION_PAIR') {
-    chrome.runtime.sendMessage({
+    sendRuntime({
       action: 'pairWithCore', code: message.payload?.code, coreOrigin: message.payload?.coreOrigin
     }, response => respond(response || { success: false, message: 'Pairing failed' }));
   } else if (message.type === 'NODECAST_EXTENSION_SYNC_SETTINGS') {
-    chrome.runtime.sendMessage({ action: 'syncExtensionSettings' }, response => respond(response || { success: false }));
+    sendRuntime({ action: 'syncExtensionSettings' }, response => respond(response || { success: false }));
   } else if (message.type === 'NODECAST_EXTENSION_DISCONNECT') {
-    chrome.runtime.sendMessage({ action: 'disconnectCore' }, response => respond(response || { success: false }));
+    sendRuntime({ action: 'disconnectCore' }, response => respond(response || { success: false }));
   }
 });
 
@@ -51,8 +86,8 @@ function fetchLayout() {
   if (layoutFetched) return;
   layoutFetched = true;
 
-  chrome.runtime.sendMessage({ action: 'fetchLayout', url: window.location.href }, (response) => {
-    if (chrome.runtime.lastError || !response) {
+  sendRuntime({ action: 'fetchLayout', url: window.location.href }, (response) => {
+    if (!response) {
       pageLayout = {
         matched: false,
         capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }]
@@ -96,7 +131,7 @@ function injectSaveButtons(layout) {
       // Build and send capture
       const pkg = buildCapturePackage(ct.type);
       if (pkg) {
-        chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: pkg });
+        sendRuntime({ action: 'saveCapturePackage', package: pkg }, response => { if (!response && !extensionAvailable()) notifyReloadRequired(); });
       }
     });
     container.appendChild(btn);
@@ -118,8 +153,8 @@ fetchLayout = function() {
   if (layoutFetched) return;
   layoutFetched = true;
 
-  chrome.runtime.sendMessage({ action: 'fetchLayout', url: window.location.href }, (response) => {
-    if (chrome.runtime.lastError || !response) {
+  sendRuntime({ action: 'fetchLayout', url: window.location.href }, (response) => {
+    if (!response) {
       pageLayout = {
         matched: false,
         capture_types: [{ type: 'page', label: 'Save Page', priority: 0 }]
@@ -212,7 +247,7 @@ function buildCapturePackage(captureType) {
       url: window.location.href,
       title: document.title,
       site_name: extractSiteName(),
-      extension_version: chrome.runtime.getManifest().version,
+      extension_version: extensionVersion,
       browser: navigator.userAgent
     },
     page_metadata: metadata,
@@ -248,7 +283,17 @@ function extractPageMetadata() {
   const schemaOrg = [];
   document.querySelectorAll('script[type="application/ld+json"]').forEach(el => {
     try {
-      schemaOrg.push(JSON.parse(el.textContent));
+      // JSON-LD may be either an object or an array of objects. Keep the
+      // CapturePackage contract flat, even for malformed nested arrays.
+      const pending = [JSON.parse(el.textContent)];
+      while (pending.length) {
+        const value = pending.pop();
+        if (Array.isArray(value)) {
+          for (let i = value.length - 1; i >= 0; i--) pending.push(value[i]);
+        } else if (value !== null && typeof value === 'object') {
+          schemaOrg.push(value);
+        }
+      }
     } catch (e) {}
   });
 
@@ -423,11 +468,51 @@ function getSelectionHtml(sel, range) {
 }
 
 // --- Glowing notification ---
+function showSavedWithReason(message, captureId) {
+  document.getElementById('nodecast-reason-host')?.remove();
+  const host = document.createElement('div');
+  host.id = 'nodecast-reason-host';
+  Object.assign(host.style, { position: 'fixed', right: '16px', bottom: '16px', zIndex: '2147483647' });
+  const shadow = host.attachShadow({ mode: 'closed' });
+  shadow.innerHTML = `<style>
+    .card{box-sizing:border-box;width:min(320px,calc(100vw - 32px));padding:14px;border:1px solid #394150;border-radius:10px;background:#171b22;color:#f5f5f5;box-shadow:0 8px 24px #0006;font:14px/1.4 system-ui,sans-serif}
+    .actions{display:flex;gap:8px;align-items:center;margin-top:9px}button{font:inherit;color:inherit;background:#292f3a;border:1px solid #4b5563;border-radius:6px;padding:6px 9px;cursor:pointer}button:focus-visible,input:focus-visible{outline:2px solid #93b4e8;outline-offset:2px}input{box-sizing:border-box;width:100%;padding:8px;background:#10141a;color:#fff;border:1px solid #626b78;border-radius:6px;font:inherit}form[hidden]{display:none}.status{margin-top:6px;font-size:12px}
+  </style><div class="card"><div class="message" role="status"></div><div class="actions"><button type="button" class="add">Add reason</button><button type="button" class="close" aria-label="Close">Close</button></div><form hidden><label>Why did you save this?<input maxlength="500" required></label><div class="suggestions"></div><div class="actions"><button type="submit">Save reason</button></div><div class="status" aria-live="polite"></div></form></div>`;
+  shadow.querySelector('.message').textContent = message;
+  const form = shadow.querySelector('form');
+  let timer = setTimeout(() => host.remove(), 7000);
+  shadow.querySelector('.close').onclick = () => { clearTimeout(timer); host.remove(); };
+  shadow.querySelector('.add').onclick = () => {
+    clearTimeout(timer); form.hidden = false; shadow.querySelector('input').focus();
+    sendRuntime({action:'getReasonSuggestions'}, response => {
+      const list = form.querySelector('.suggestions'); list.replaceChildren();
+      for (const reason of response?.suggestions || []) {
+        const option = document.createElement('button'); option.type = 'button'; option.textContent = reason;
+        option.onclick = () => { form.querySelector('input').value = reason; form.querySelector('input').focus(); };
+        list.append(option);
+      }
+    });
+  };
+  form.onsubmit = event => {
+    event.preventDefault();
+    const button = form.querySelector('button');
+    const status = form.querySelector('.status');
+    button.disabled = true;
+    sendRuntime({ action: 'setCaptureReason', captureId, reason: form.querySelector('input').value }, response => {
+      button.disabled = false;
+      status.textContent = response?.success ? 'Reason saved.' : (response?.message || 'Could not save the reason. The capture is still saved.');
+      if (response?.success) { form.hidden = true; shadow.querySelector('.message').textContent = 'Reason saved.'; shadow.querySelector('.add').hidden = true; timer = setTimeout(() => host.remove(), 2500); }
+    });
+  };
+  document.body.appendChild(host);
+}
+
 function showGlow(message, isError) {
   const existing = document.getElementById('nodecast-glow');
   if (existing) existing.remove();
 
-  chrome.storage.sync.get(['glowPosition'], (settings) => {
+  readExtensionSettings(['glowPosition'], (settings) => {
+    if (!settings) return;
     const position = settings.glowPosition || 'top-center';
     const positions = {
       'top-left': { top: '16px', left: '16px', transform: 'none' },
@@ -502,24 +587,44 @@ function showFloatingSave(range, pkg) {
   Object.assign(floatingHost.style, { position: 'fixed', zIndex: '2147483647', left: '0', top: '0' });
   const shadow = floatingHost.attachShadow({ mode: 'closed' });
   shadow.innerHTML = `<style>
-    button{all:initial;box-sizing:border-box;display:flex;align-items:center;gap:7px;padding:8px 12px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:#111827;color:#f8fafc;box-shadow:0 8px 28px rgba(0,0,0,.34);font:600 13px/1 system-ui,-apple-system,sans-serif;cursor:pointer;user-select:none;transition:transform .15s ease,background .15s ease}
-    button:hover{background:#1f2937;transform:translateY(-1px)}button:disabled{cursor:default;opacity:.9;transform:none}.mark{color:#60a5fa;font-size:15px}.success{background:#047857}.error{background:#b91c1c}
-  </style><button type="button" aria-label="Save selection to Nodecast"><span class="mark">◆</span><span class="label">Save</span></button>`;
-  const button = shadow.querySelector('button');
+    .bar{box-sizing:border-box;display:flex;align-items:center;gap:5px;max-width:calc(100vw - 16px);padding:4px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:#111827;color:#f8fafc;box-shadow:0 8px 28px rgba(0,0,0,.34);font:13px/1 system-ui,-apple-system,sans-serif}
+    .input-wrap{position:relative;overflow:hidden}.example{position:absolute;left:7px;right:2px;top:50%;transform:translateY(-50%);color:#9ca3af;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;transition:opacity .18s,transform .18s}.example.scroll{opacity:0;transform:translateY(-90%)}.input-wrap:focus-within .example,.example[hidden]{display:none}input{all:initial;box-sizing:border-box;width:min(190px,38vw);min-width:55px;padding:5px 7px;color:#f8fafc;font:13px system-ui,sans-serif}input:focus-visible,button:focus-visible{outline:2px solid #93b4e8;outline-offset:2px}
+    button{all:initial;box-sizing:border-box;color:#f8fafc;font:600 13px/1 system-ui,-apple-system,sans-serif;cursor:pointer}.save{display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:999px;background:#273142}.save:hover{background:#374151}.save:disabled{opacity:.75;cursor:default}.mark{color:#60a5fa;font-size:15px}.info{position:relative;padding:5px;color:#9ca3af}.tip{display:none;position:absolute;bottom:calc(100% + 8px);right:-60px;width:min(210px,calc(100vw - 40px));padding:8px;border:1px solid #394150;border-radius:7px;background:#171b22;color:#f5f5f5;font:12px/1.4 system-ui,sans-serif;white-space:normal;box-shadow:0 4px 12px #0005}:host([data-tip-below]) .tip{bottom:auto;top:calc(100% + 8px)}.info:hover .tip,.info:focus-visible .tip{display:block}.success{background:#047857}.error{background:#b91c1c}
+  </style><div class="bar"><span class="input-wrap"><input type="text" maxlength="500" aria-label="Optional reason for saving"><span class="example" aria-hidden="true"></span></span><button type="button" class="info" aria-label="About the optional reason" aria-describedby="reason-tip">ⓘ<span class="tip" id="reason-tip" role="tooltip">Optional: add a short note about why you are saving this. You can leave it empty.</span></button><button type="button" class="save" aria-label="Save selection to Nodecast"><span class="mark">◆</span><span class="label">Save</span></button></div>`;
+  const button = shadow.querySelector('.save');
+  const reasonInput = shadow.querySelector('input');
+  const examples = ['Why save this? (optional)', 'Try this later', 'Compare with another tool', 'Remember this solution'];
+  let exampleIndex = 0;
+  const example = shadow.querySelector('.example');
+  example.textContent = examples[0];
+  reasonInput.addEventListener('input', () => { example.hidden = Boolean(reasonInput.value); });
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const exampleTimer = reduceMotion ? null : setInterval(() => {
+    if (!floatingHost?.isConnected) { clearInterval(exampleTimer); return; }
+    if (!reasonInput.value && shadow.activeElement !== reasonInput) {
+      example.classList.add('scroll');
+      setTimeout(() => { example.textContent = examples[++exampleIndex % examples.length]; example.classList.remove('scroll'); }, 180);
+    }
+  }, 2800);
+  reasonInput.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); button.click(); } if (event.key === 'Escape') removeFloatingSave(); });
   button.addEventListener('mousedown', event => event.preventDefault());
   button.addEventListener('click', () => {
     if (!floatingPackage) return;
     button.disabled = true;
     shadow.querySelector('.label').textContent = 'Saving…';
-    chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: floatingPackage }, response => {
-      if (chrome.runtime.lastError || !response?.success) {
+    const savePackage = { ...floatingPackage, save_reason: reasonInput.value.trim() };
+    reasonInput.disabled = true;
+    sendRuntime({ action: 'saveCapturePackage', package: savePackage, suppressToast: true }, response => {
+      if (!response?.success) {
+        if (!extensionAvailable()) notifyReloadRequired();
         button.classList.add('error');
-        shadow.querySelector('.label').textContent = 'Save failed';
+        shadow.querySelector('.label').textContent = response?.message || 'Save failed';
+        button.disabled = false; reasonInput.disabled = false;
       } else {
         button.classList.add('success');
         shadow.querySelector('.label').textContent = 'Saved';
       }
-      setTimeout(removeFloatingSave, response?.success ? 900 : 1800);
+      if (response?.success) setTimeout(removeFloatingSave, 900);
     });
   });
   document.documentElement.appendChild(floatingHost);
@@ -528,11 +633,13 @@ function showFloatingSave(range, pkg) {
   const left = Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - 8);
   const preferredTop = rect.top - 44;
   const top = preferredTop >= 8 ? preferredTop : Math.min(window.innerHeight - 42, rect.bottom + 8);
+  if (top < 90) floatingHost.setAttribute('data-tip-below', '');
   floatingHost.style.left = `${left}px`;
   floatingHost.style.top = `${top}px`;
 }
 
 function prepareFloatingSave() {
+  if (!extensionAvailable()) return removeFloatingSave();
   if (document.querySelector('meta[name="nodecast-core"]')) return removeFloatingSave();
   const selection = window.getSelection();
   const text = selection?.toString().trim() || '';
@@ -540,7 +647,8 @@ function prepareFloatingSave() {
   const range = selection.getRangeAt(0).cloneRange();
   const pkg = buildCapturePackage('snippet');
   if (!pkg?.anchor) return removeFloatingSave();
-  chrome.storage.sync.get(['floatingButtonEnabled', 'minSelectionLength', 'defaultProject'], settings => {
+  readExtensionSettings(['floatingButtonEnabled', 'minSelectionLength', 'defaultProject'], settings => {
+    if (!settings) return removeFloatingSave();
     if (settings.floatingButtonEnabled === false || text.length < (settings.minSelectionLength || 10)) return removeFloatingSave();
     pkg.project = settings.defaultProject || '';
     showFloatingSave(range, pkg);
@@ -552,6 +660,7 @@ document.addEventListener('mouseup', event => {
   setTimeout(prepareFloatingSave, 20);
 });
 document.addEventListener('keyup', event => {
+  if (floatingHost && event.composedPath().includes(floatingHost)) return;
   if (event.key === 'Escape') return removeFloatingSave();
   if (event.shiftKey || event.key.startsWith('Arrow')) setTimeout(prepareFloatingSave, 20);
 });
@@ -566,6 +675,7 @@ window.addEventListener('resize', removeFloatingSave);
 // Capture phase also prevents page-level shortcut handlers from swallowing it.
 document.addEventListener('keydown', (event) => {
   if (!(event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyS')) return;
+  if (!extensionAvailable()) { notifyReloadRequired(); return; }
 
   event.preventDefault();
   event.stopImmediatePropagation();
@@ -576,8 +686,9 @@ document.addEventListener('keydown', (event) => {
   }
 
   const pkg = buildCapturePackage('snippet');
-  chrome.storage.sync.get(['defaultProject'], settings => {
+  readExtensionSettings(['defaultProject'], settings => {
+    if (!settings) { notifyReloadRequired(); return; }
     pkg.project = settings.defaultProject || '';
-    chrome.runtime.sendMessage({ action: 'saveCapturePackage', package: pkg });
+    sendRuntime({ action: 'saveCapturePackage', package: pkg }, response => { if (!response && !extensionAvailable()) notifyReloadRequired(); });
   });
 }, true);

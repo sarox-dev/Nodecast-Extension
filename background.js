@@ -3,6 +3,47 @@
 // Supports Capture Layout — domain-specific capture types
 
 const DEFAULT_API_URL = 'http://localhost:5000/api/capture';
+const CORE_REQUEST_TIMEOUT_MS = 15_000;
+
+function coreOriginFromApiUrl(apiUrl) {
+  return (apiUrl || DEFAULT_API_URL)
+    .replace(/\/api\/capture.*$/, '')
+    .replace(/\/api$/, '');
+}
+
+async function fetchWithTimeout(url, options = {}, timeout = CORE_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function clearCoreConnection() {
+  await chrome.storage.sync.remove(['apiToken', 'pairedUsername', 'pairedUserId']);
+}
+
+async function validateCoreConnection(settings) {
+  if (!settings.apiToken) return { connected: false, username: '' };
+  const origin = coreOriginFromApiUrl(settings.apiUrl);
+  try {
+    const response = await fetchWithTimeout(`${origin}/api/extension/settings`, {
+      headers: { Authorization: `Bearer ${settings.apiToken}` }
+    }, 6_000);
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) await clearCoreConnection();
+      const data = await response.json().catch(() => ({}));
+      return { connected: false, username: '', message: data.detail || `Connection check failed (${response.status})` };
+    }
+    const data = await response.json();
+    return { connected: true, username: data.username || settings.pairedUsername || '', settings: data.settings || {} };
+  } catch (error) {
+    const message = error.name === 'AbortError' ? 'Nodecast connection timed out' : `Could not reach Nodecast: ${error.message}`;
+    return { connected: false, username: settings.pairedUsername || '', message };
+  }
+}
 
 // --- Initialization ---
 chrome.runtime.onInstalled.addListener(() => {
@@ -54,6 +95,7 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'save-selection' && info.selectionText) {
     chrome.tabs.sendMessage(tab.id, { action: 'buildCapturePackage', captureType: 'snippet' }, (response) => {
+      void chrome.runtime.lastError;
       if (response && response.package) {
         sendCapturePackage(response.package, tab.id);
       } else {
@@ -63,6 +105,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
   if (info.menuItemId === 'save-page') {
     chrome.tabs.sendMessage(tab.id, { action: 'buildCapturePackage', captureType: 'page' }, (response) => {
+      void chrome.runtime.lastError;
       if (response && response.package) {
         sendCapturePackage(response.package, tab.id);
       } else {
@@ -82,10 +125,12 @@ chrome.commands.onCommand.addListener((command) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       chrome.tabs.sendMessage(tabs[0].id, { action: 'buildCapturePackage', captureType: 'snippet' }, (response) => {
+        void chrome.runtime.lastError;
         if (response && response.package) {
           sendCapturePackage(response.package, tabs[0].id);
         } else {
           chrome.tabs.sendMessage(tabs[0].id, { action: 'getSelection' }, (r2) => {
+            void chrome.runtime.lastError;
             if (r2 && r2.text) sendBasicCapture(tabs[0], r2.text, 'snippet');
           });
         }
@@ -96,6 +141,7 @@ chrome.commands.onCommand.addListener((command) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       chrome.tabs.sendMessage(tabs[0].id, { action: 'buildCapturePackage', captureType: 'page' }, (response) => {
+        void chrome.runtime.lastError;
         if (response && response.package) {
           sendCapturePackage(response.package, tabs[0].id);
         }
@@ -110,11 +156,13 @@ chrome.commands.onCommand.addListener((command) => {
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getExtensionStatus') {
-    chrome.storage.sync.get(['apiToken', 'pairedUsername'], (settings) => {
+    chrome.storage.sync.get(['apiUrl', 'apiToken', 'pairedUsername'], async (settings) => {
+      const connection = await validateCoreConnection(settings);
       sendResponse({
         detected: true,
-        connected: Boolean(settings.apiToken),
-        username: settings.pairedUsername || '',
+        connected: connection.connected,
+        username: connection.username,
+        message: connection.message || '',
         version: chrome.runtime.getManifest().version,
         capabilities: ['pairing', 'settings-sync', 'floating-save', 'shortcut', 'context-menu']
       });
@@ -140,12 +188,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // From content.js — save Capture Package
   if (request.action === 'saveCapturePackage' && request.package) {
     const finish = (tabId) => {
-      sendCapturePackage(request.package, tabId)
+      sendCapturePackage(request.package, tabId, { suppressToast: Boolean(request.suppressToast) })
         .then(sendResponse)
         .catch(error => sendResponse({ success: false, message: error.message }));
     };
     if (sender.tab?.id) finish(sender.tab.id);
     else chrome.tabs.query({ active: true, currentWindow: true }, tabs => finish(tabs[0]?.id || null));
+    return true;
+  }
+
+  if (request.action === 'setCaptureReason') {
+    setCaptureReason(request.captureId, request.reason).then(sendResponse);
+    return true;
+  }
+  if (request.action === 'getReasonSuggestions') {
+    getReasonSuggestions().then(sendResponse);
     return true;
   }
 
@@ -156,6 +213,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         action: 'buildCapturePackage',
         captureType: 'snippet'
       }, (response) => {
+        void chrome.runtime.lastError;
         if (response && response.package) {
           sendCapturePackage(response.package, sender.tab?.id || request.tab?.id);
         } else {
@@ -194,6 +252,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // From popup — get layout info for current tab
   if (request.action === 'getLayout') {
     chrome.tabs.sendMessage(sender.tab?.id || request.tab?.id, { action: 'getLayout' }, (response) => {
+      void chrome.runtime.lastError;
       sendResponse(response?.layout || null);
     });
     return true;
@@ -228,8 +287,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 function isAllowedCoreOrigin(origin) {
   try {
     const url = new URL(origin);
+    const host = url.hostname;
+    const privateIpv4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
     return ['http:', 'https:'].includes(url.protocol)
-      && ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname);
+      && (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host) || privateIpv4);
   } catch {
     return false;
   }
@@ -258,22 +319,17 @@ async function pairWithCore(coreOrigin, code) {
 }
 
 async function syncExtensionSettings() {
-  const stored = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
-  if (!stored.apiToken) return { success: false, message: 'Extension is not connected' };
-  const origin = (stored.apiUrl || DEFAULT_API_URL).replace(/\/api\/capture.*$/, '').replace(/\/api$/, '');
+  const stored = await chrome.storage.sync.get(['apiUrl', 'apiToken', 'pairedUsername']);
+  const connection = await validateCoreConnection(stored);
+  if (!connection.connected) return { success: false, message: connection.message || 'Extension is not connected' };
   try {
-    const response = await fetch(`${origin}/api/extension/settings`, {
-      headers: { Authorization: `Bearer ${stored.apiToken}` }
-    });
-    const data = await response.json();
-    if (!response.ok) return { success: false, message: data.detail || 'Settings sync failed' };
-    const settings = data.settings || {};
+    const settings = connection.settings || {};
     await chrome.storage.sync.set({
       floatingButtonEnabled: settings.floating_button_enabled !== false,
       minSelectionLength: settings.min_selection_length || 10,
       glowPosition: settings.notification_position || 'top-center',
       defaultProject: settings.default_project || '',
-      pairedUsername: data.username || ''
+      pairedUsername: connection.username || ''
     });
     return { success: true, settings };
   } catch (error) {
@@ -282,7 +338,7 @@ async function syncExtensionSettings() {
 }
 
 // --- Send Capture Package to API ---
-async function sendCapturePackage(pkg, tabId) {
+async function sendCapturePackage(pkg, tabId, { suppressToast = false } = {}) {
   const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken', 'defaultProject']);
   const apiUrl = (settings.apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
   const headers = { 'Content-Type': 'application/json' };
@@ -290,7 +346,7 @@ async function sendCapturePackage(pkg, tabId) {
   if (!pkg.project && settings.defaultProject) pkg.project = settings.defaultProject;
 
   try {
-    const response = await fetch(apiUrl, {
+    const response = await fetchWithTimeout(apiUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(pkg)
@@ -303,11 +359,12 @@ async function sendCapturePackage(pkg, tabId) {
       const detail = typeof data.detail === 'string'
         ? data.detail
         : JSON.stringify(data.detail || data || {});
-      const message = response.status === 401
-        ? 'Token expired — open Nodecast settings and get a new token'
+      if (response.status === 401 || response.status === 403) await clearCoreConnection();
+      const message = response.status === 401 || response.status === 403
+        ? 'Extension connection expired or account changed — reconnect in Nodecast Settings'
         : `Save failed (${response.status}): ${detail || response.statusText}`;
       console.error('Nodecast API error:', { status: response.status, detail, data });
-      showToast(tabId, message, true);
+      if (!suppressToast) showToast(tabId, message, true);
       return { success: false, status: response.status, message, data };
     }
 
@@ -321,13 +378,16 @@ async function sendCapturePackage(pkg, tabId) {
       text: pkg.anchor?.selected_text?.substring(0, 100) || ''
     };
     await chrome.storage.local.set({ highlights: [entry, ...result.highlights].slice(0, 100) });
-    showToast(tabId, data.message || 'Saved to Nodecast', false);
+    if (!suppressToast) showToast(tabId, data.message || 'Saved to Nodecast', false);
     console.info('Nodecast capture saved:', { id: data.id, type: entry.type, url: entry.url });
     return data;
   } catch (error) {
+    const message = error.name === 'AbortError'
+      ? 'Nodecast did not respond within 15 seconds'
+      : `Nodecast unavailable: ${error.message}`;
     console.error('Nodecast API unavailable:', error);
-    showToast(tabId, `Nodecast unavailable: ${error.message}`, true);
-    return { success: false, message: error.message };
+    if (!suppressToast) showToast(tabId, message, true);
+    return { success: false, message };
   }
 }
 
@@ -352,8 +412,36 @@ function sendBasicCapture(tab, text, captureType) {
   sendCapturePackage(pkg, tab.id);
 }
 
-function showToast(tabId, msg, isError) {
+async function setCaptureReason(captureId, reason) {
+  if (!/^[A-Za-z0-9_-]{12,64}$/.test(captureId || '') || typeof reason !== 'string' || !reason.trim() || reason.length > 500) {
+    return { success: false, message: 'Enter a reason of up to 500 characters.' };
+  }
+  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  const apiUrl = (settings.apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
+  try {
+    const response = await fetchWithTimeout(`${apiUrl}/${encodeURIComponent(captureId)}/reason`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', ...(settings.apiToken ? { Authorization: `Bearer ${settings.apiToken}` } : {}) },
+      body: JSON.stringify({ reason: reason.trim(), status: 'confirmed' }),
+    });
+    if (!response.ok) return { success: false, message: 'Could not save the reason. Check your Nodecast connection.' };
+    return { success: true };
+  } catch {
+    return { success: false, message: 'Could not save the reason. The capture is still saved.' };
+  }
+}
+
+async function getReasonSuggestions() {
+  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  const origin = (settings.apiUrl || DEFAULT_API_URL).replace(/\/api\/capture\/?$/, '');
+  try {
+    const response = await fetchWithTimeout(`${origin}/api/capture-reason/suggestions`, { headers: settings.apiToken ? { Authorization: `Bearer ${settings.apiToken}` } : {} });
+    if (!response.ok) return { suggestions: [] };
+    return await response.json();
+  } catch { return { suggestions: [] }; }
+}
+
+function showToast(tabId, msg, isError, captureId = '') {
   if (tabId) {
-    chrome.tabs.sendMessage(tabId, { action: 'showToast', message: msg, isError }).catch(() => {});
+    chrome.tabs.sendMessage(tabId, { action: 'showToast', message: msg, isError, captureId }).catch(() => {});
   }
 }

@@ -4,68 +4,9 @@ const saveSelectionBtn = document.getElementById('saveSelectionBtn');
 const savePageBtn = document.getElementById('savePageBtn');
 const openNodecastBtn = document.getElementById('openNodecastBtn');
 const settingsBtn = document.getElementById('settingsBtn');
-const projectSelect = document.getElementById('projectSelect');
-const newProjectBtn = document.getElementById('newProjectBtn');
 const shortcutSaveSelection = document.getElementById('shortcut-save-selection');
 const shortcutSavePage = document.getElementById('shortcut-save-page');
 const shortcutOpenNodecast = document.getElementById('shortcut-open-nodecast');
-
-// --- Load projects & settings ---
-function loadProjects() {
-  chrome.storage.sync.get(['apiUrl', 'defaultProject', 'shortcutKey'], (settings) => {
-    const apiUrl = (settings.apiUrl || 'http://localhost:5000/api/capture')
-      .replace(/\/api\/capture.*$/, '')
-      .replace(/\/api$/, '') || 'http://localhost:5000';
-    const baseUrl = apiUrl.replace(/\/+$/, '');
-
-    fetch(baseUrl + '/api/tags')
-      .then(r => r.json())
-      .then(data => {
-        const projects = data.projects || [];
-        projectSelect.innerHTML = '<option value="">— None —</option>';
-        projects.forEach(p => {
-          const opt = document.createElement('option');
-          opt.value = p.name;
-          opt.textContent = p.name;
-          if (p.name === settings.defaultProject) opt.selected = true;
-          projectSelect.appendChild(opt);
-        });
-      })
-      .catch(() => {
-        projectSelect.innerHTML = '<option value="">— Offline —</option>';
-      });
-  });
-}
-
-// --- Save selected project ---
-projectSelect.addEventListener('change', () => {
-  chrome.storage.sync.set({ defaultProject: projectSelect.value });
-});
-
-// --- Create new project ---
-newProjectBtn.addEventListener('click', () => {
-  const name = prompt('New project name:');
-  if (!name || !name.trim()) return;
-  const nameTrimmed = name.trim();
-  chrome.storage.sync.get(['apiUrl'], (settings) => {
-    const baseUrl = (settings.apiUrl || 'http://localhost:5000/api/capture')
-      .replace(/\/api\/capture.*$/, '')
-      .replace(/\/api$/, '') || 'http://localhost:5000';
-    fetch(baseUrl + '/api/projects', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: nameTrimmed })
-    })
-      .then(r => r.json())
-      .then(res => {
-        if (res.success || res.created !== undefined) {
-          chrome.storage.sync.set({ defaultProject: nameTrimmed });
-          loadProjects();
-        }
-      })
-      .catch(() => {});
-  });
-});
 
 // --- Save current selection ---
 saveSelectionBtn.addEventListener('click', () => {
@@ -183,7 +124,6 @@ function showGlow(msg, isError) {
 document.addEventListener('DOMContentLoaded', () => {
 
 // --- Initialization ---
-loadProjects();
 chrome.commands.getAll((commands) => {
     commands.forEach(cmd => {
         if (cmd.name === 'save-selection' && shortcutSaveSelection) {

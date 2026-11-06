@@ -215,5 +215,5 @@ Commercial licenses for proprietary use are available from the author.
 
 [license-badge]: https://img.shields.io/badge/License-AGPL--3.0-blue?logo=gnu
 [license-url]: LICENSE
-[version-badge]: https://img.shields.io/badge/Version-1.1.0-orange
+[version-badge]: https://img.shields.io/badge/Version-1.3.0-orange
 [extension-url]: https://github.com/sarox-dev/Nodecast-Extension
