@@ -59,7 +59,7 @@ openNodecastBtn.addEventListener('click', () => {
 
 // --- Settings ---
 settingsBtn.addEventListener('click', () => {
-  chrome.storage.sync.get(['apiUrl'], (settings) => {
+  chrome.storage.local.get(['apiUrl'], (settings) => {
     const origin = (settings.apiUrl || 'http://localhost:5000/api/capture')
       .replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
     chrome.tabs.create({ url: `${origin}/?settings=extension` });
@@ -72,7 +72,7 @@ function showGlow(msg, isError) {
   const existing = document.getElementById('nodecast-glow');
   if (existing) existing.remove();
 
-  chrome.storage.sync.get(['glowPosition'], (settings) => {
+  chrome.storage.local.get(['glowPosition'], (settings) => {
     const position = settings.glowPosition || 'top-center';
     const positions = {
       'top-left': { top: '16px', left: '16px', transform: 'none' },
@@ -138,7 +138,7 @@ chrome.commands.getAll((commands) => {
     });
 });
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === 'sync' && changes.defaultProject) {
+  if (areaName === 'local' && changes.defaultProject) {
     projectSelect.value = changes.defaultProject.newValue || '';
   }
 });

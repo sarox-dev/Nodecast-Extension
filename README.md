@@ -217,3 +217,7 @@ Commercial licenses for proprietary use are available from the author.
 [license-url]: LICENSE
 [version-badge]: https://img.shields.io/badge/Version-1.3.0-orange
 [extension-url]: https://github.com/sarox-dev/Nodecast-Extension
+
+## Connection confirmation
+
+Connect from Nodecast Settings and approve the server address in the extension confirmation tab within 90 seconds. LAN IP addresses and LAN hostnames are supported. Connection credentials are stored on this device and removed from browser sync on upgrade.

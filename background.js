@@ -1,3 +1,32 @@
+// Connection credentials belong to this device, never browser sync.
+const storageReady = (async () => {
+  const legacy = await chrome.storage.sync.get(null);
+  const local = await chrome.storage.local.get(null);
+  const missing = Object.fromEntries(Object.entries(legacy).filter(([key]) => !(key in local)));
+  if (Object.keys(missing).length) await chrome.storage.local.set(missing);
+  await chrome.storage.sync.remove(['apiUrl', 'apiToken', 'pairedUsername', 'pairedUserId']);
+})();
+const deviceStorage = {
+  async get(keys, callback) {
+    await storageReady;
+    const result = await chrome.storage.local.get(keys);
+    if (callback) callback(result);
+    return result;
+  },
+  async set(values) { await storageReady; return chrome.storage.local.set(values); },
+  async remove(keys, callback) {
+    await storageReady;
+    await chrome.storage.local.remove(keys);
+    if (callback) callback();
+  },
+};
+const pendingPairings = new Map();
+
+function trustedCoreSender(sender, origin) {
+  try { return Boolean(sender.tab) && new URL(sender.url || sender.tab.url).origin === origin; }
+  catch { return false; }
+}
+
 // background.js — Nodecast Extension Service Worker (Fāze 1 + Layout)
 // Sends Capture Package to Nodecast Core API
 // Supports Capture Layout — domain-specific capture types
@@ -22,10 +51,10 @@ async function fetchWithTimeout(url, options = {}, timeout = CORE_REQUEST_TIMEOU
 }
 
 async function clearCoreConnection() {
-  await chrome.storage.sync.remove(['apiToken', 'pairedUsername', 'pairedUserId']);
+  await deviceStorage.remove(['apiToken', 'pairedUsername', 'pairedUserId']);
 }
 
-async function validateCoreConnection(settings) {
+async function validateCoreConnection(settings, clearInvalid = true) {
   if (!settings.apiToken) return { connected: false, username: '' };
   const origin = coreOriginFromApiUrl(settings.apiUrl);
   try {
@@ -33,7 +62,7 @@ async function validateCoreConnection(settings) {
       headers: { Authorization: `Bearer ${settings.apiToken}` }
     }, 6_000);
     if (!response.ok) {
-      if (response.status === 401 || response.status === 403) await clearCoreConnection();
+      if (clearInvalid && (response.status === 401 || response.status === 403)) await clearCoreConnection();
       const data = await response.json().catch(() => ({}));
       return { connected: false, username: '', message: data.detail || `Connection check failed (${response.status})` };
     }
@@ -68,9 +97,9 @@ chrome.runtime.onInstalled.addListener(() => {
     });
   });
   // Set defaults if first install
-  chrome.storage.sync.get(['apiUrl', 'shortcutKey'], (r) => {
+  deviceStorage.get(['apiUrl', 'shortcutKey'], (r) => {
     if (!r.apiUrl) {
-      chrome.storage.sync.set({
+      deviceStorage.set({
         apiUrl: DEFAULT_API_URL,
         floatingButtonEnabled: true,
         minSelectionLength: 10,
@@ -78,7 +107,7 @@ chrome.runtime.onInstalled.addListener(() => {
       });
     } else if (!r.shortcutKey || r.shortcutKey === 'Alt+Shift+R') {
       // Older releases used R for both save-selection and open-nodecast.
-      chrome.storage.sync.set({ shortcutKey: 'Alt+Shift+S' });
+      deviceStorage.set({ shortcutKey: 'Alt+Shift+S' });
     }
   });
 });
@@ -156,7 +185,7 @@ chrome.commands.onCommand.addListener((command) => {
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getExtensionStatus') {
-    chrome.storage.sync.get(['apiUrl', 'apiToken', 'pairedUsername'], async (settings) => {
+    deviceStorage.get(['apiUrl', 'apiToken', 'pairedUsername'], async (settings) => {
       const connection = await validateCoreConnection(settings);
       sendResponse({
         detected: true,
@@ -171,7 +200,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'pairWithCore') {
-    pairWithCore(request.coreOrigin, request.code).then(sendResponse);
+    if (!isAllowedCoreOrigin(request.coreOrigin) || !trustedCoreSender(sender, request.coreOrigin)) {
+      sendResponse({success: false, message: 'Untrusted Core page'});
+      return false;
+    }
+    const id = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      pendingPairings.delete(id);
+      sendResponse({success: false, message: 'Pairing confirmation expired'});
+    }, 90000);
+    pendingPairings.set(id, {origin: request.coreOrigin, code: request.code, respond: sendResponse, timer});
+    chrome.tabs.create({url: chrome.runtime.getURL('pair.html') + '#' + id});
+    return true;
+  }
+  if (request.action === 'reviewPairing' || request.action === 'approvePairing') {
+    if (sender.url?.split('#')[0] !== chrome.runtime.getURL('pair.html')) return false;
+    const pending = pendingPairings.get(request.id);
+    if (!pending) {
+      sendResponse({success: false, message: 'Pairing request expired. Return to Core and reconnect.'});
+      return false;
+    }
+    if (request.action === 'reviewPairing') {
+      sendResponse({success: true, origin: pending.origin});
+      return false;
+    }
+    pendingPairings.delete(request.id);
+    clearTimeout(pending.timer);
+    pairWithCore(pending.origin, pending.code).then(result => {
+      pending.respond(result);
+      sendResponse(result);
+    });
     return true;
   }
 
@@ -181,7 +239,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'disconnectCore') {
-    chrome.storage.sync.remove(['apiToken', 'pairedUsername', 'pairedUserId'], () => sendResponse({ success: true }));
+    deviceStorage.get(['apiUrl']).then(settings => {
+      if (!trustedCoreSender(sender, coreOriginFromApiUrl(settings.apiUrl))) {
+        sendResponse({success: false, message: 'Untrusted Core page'});
+        return;
+      }
+      clearCoreConnection().then(() => sendResponse({success: true}));
+    });
     return true;
   }
 
@@ -260,10 +324,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // From content.js — fetch layout (routed through background to avoid mixed content blocking)
   if (request.action === 'fetchLayout' && request.url) {
-    chrome.storage.sync.get(['apiUrl'], (s) => {
+    deviceStorage.get(['apiUrl'], (s) => {
       const baseUrl = (s.apiUrl || DEFAULT_API_URL)
         .replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
-      const checkUrl = `${baseUrl}/api/layouts/check?url=${encodeURIComponent(request.url)}`;
+      const checkUrl = `${baseUrl}/api/layouts/check?url=${encodeURIComponent(new URL(request.url).origin + new URL(request.url).pathname)}`;
       fetch(checkUrl)
         .then(res => res.json())
         .then(data => sendResponse({ layout: data }))
@@ -274,7 +338,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // From popup — open Nodecast
   if (request.action === 'openNodecast') {
-    chrome.storage.sync.get(['apiUrl'], (s) => {
+    deviceStorage.get(['apiUrl'], (s) => {
       const baseUrl = s.apiUrl || DEFAULT_API_URL;
       const origin = baseUrl.replace(/\/api\/capture.*$/, '').replace(/\/api$/, '') || 'http://localhost:5000';
       chrome.tabs.create({ url: origin });
@@ -287,13 +351,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 function isAllowedCoreOrigin(origin) {
   try {
     const url = new URL(origin);
-    const host = url.hostname;
-    const privateIpv4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
     return ['http:', 'https:'].includes(url.protocol)
-      && (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host) || privateIpv4);
-  } catch {
-    return false;
-  }
+      && !url.username && !url.password && url.origin === origin;
+  } catch { return false; }
 }
 
 async function pairWithCore(coreOrigin, code) {
@@ -304,12 +364,15 @@ async function pairWithCore(coreOrigin, code) {
     });
     const data = await response.json();
     if (!response.ok || !data.token) return { success: false, message: data.detail || 'Pairing failed' };
-    await chrome.storage.sync.set({
+    const candidate = {
       apiUrl: `${coreOrigin}/api/capture`,
       apiToken: data.token,
       pairedUsername: data.username,
       pairedUserId: data.user_id
-    });
+    };
+    const checked = await validateCoreConnection(candidate, false);
+    if (!checked.connected) return {success: false, message: checked.message || 'Core verification failed'};
+    await deviceStorage.set(candidate);
     const synced = await syncExtensionSettings();
     if (!synced.success) return synced;
     return { success: true, username: data.username };
@@ -319,12 +382,12 @@ async function pairWithCore(coreOrigin, code) {
 }
 
 async function syncExtensionSettings() {
-  const stored = await chrome.storage.sync.get(['apiUrl', 'apiToken', 'pairedUsername']);
+  const stored = await deviceStorage.get(['apiUrl', 'apiToken', 'pairedUsername']);
   const connection = await validateCoreConnection(stored);
   if (!connection.connected) return { success: false, message: connection.message || 'Extension is not connected' };
   try {
     const settings = connection.settings || {};
-    await chrome.storage.sync.set({
+    await deviceStorage.set({
       floatingButtonEnabled: settings.floating_button_enabled !== false,
       minSelectionLength: settings.min_selection_length || 10,
       glowPosition: settings.notification_position || 'top-center',
@@ -339,7 +402,7 @@ async function syncExtensionSettings() {
 
 // --- Send Capture Package to API ---
 async function sendCapturePackage(pkg, tabId, { suppressToast = false } = {}) {
-  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken', 'defaultProject']);
+  const settings = await deviceStorage.get(['apiUrl', 'apiToken', 'defaultProject']);
   const apiUrl = (settings.apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
   const headers = { 'Content-Type': 'application/json' };
   if (settings.apiToken) headers.Authorization = `Bearer ${settings.apiToken}`;
@@ -416,7 +479,7 @@ async function setCaptureReason(captureId, reason) {
   if (!/^[A-Za-z0-9_-]{12,64}$/.test(captureId || '') || typeof reason !== 'string' || !reason.trim() || reason.length > 500) {
     return { success: false, message: 'Enter a reason of up to 500 characters.' };
   }
-  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  const settings = await deviceStorage.get(['apiUrl', 'apiToken']);
   const apiUrl = (settings.apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
   try {
     const response = await fetchWithTimeout(`${apiUrl}/${encodeURIComponent(captureId)}/reason`, {
@@ -431,7 +494,7 @@ async function setCaptureReason(captureId, reason) {
 }
 
 async function getReasonSuggestions() {
-  const settings = await chrome.storage.sync.get(['apiUrl', 'apiToken']);
+  const settings = await deviceStorage.get(['apiUrl', 'apiToken']);
   const origin = (settings.apiUrl || DEFAULT_API_URL).replace(/\/api\/capture\/?$/, '');
   try {
     const response = await fetchWithTimeout(`${origin}/api/capture-reason/suggestions`, { headers: settings.apiToken ? { Authorization: `Bearer ${settings.apiToken}` } : {} });
