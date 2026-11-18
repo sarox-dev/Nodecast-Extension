@@ -606,9 +606,9 @@ function showFloatingSave(range, pkg) {
       setTimeout(() => { example.textContent = examples[++exampleIndex % examples.length]; example.classList.remove('scroll'); }, 180);
     }
   }, 2800);
-  reasonInput.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); button.click(); } if (event.key === 'Escape') removeFloatingSave(); });
+  reasonInput.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Enter' && event.isTrusted) { event.preventDefault(); saveFloatingCapture(event); } if (event.key === 'Escape') removeFloatingSave(); });
   button.addEventListener('mousedown', event => event.preventDefault());
-  button.addEventListener('click', event => {
+  function saveFloatingCapture(event) {
     if (!event.isTrusted) return;
     if (!floatingPackage) return;
     button.disabled = true;
@@ -627,7 +627,8 @@ function showFloatingSave(range, pkg) {
       }
       if (response?.success) setTimeout(removeFloatingSave, 900);
     });
-  });
+  }
+  button.addEventListener('click', saveFloatingCapture);
   document.documentElement.appendChild(floatingHost);
   const buttonRect = floatingHost.getBoundingClientRect();
   const width = Math.max(buttonRect.width, 82);
