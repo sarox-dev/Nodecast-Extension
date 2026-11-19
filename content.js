@@ -48,7 +48,8 @@ sentinel.content = 'installed';
 document.head.appendChild(sentinel);
 
 // --- Core page bridge ---
-// Only Nodecast's loopback workspace can request pairing. Tokens stay in the service worker.
+// Core pages may request pairing; the worker checks the origin and user approval.
+// Tokens stay in the service worker. Status/settings require the paired origin.
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== window.location.origin) return;
   const message = event.data;

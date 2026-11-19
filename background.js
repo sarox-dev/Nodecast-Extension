@@ -27,6 +27,11 @@ function trustedCoreSender(sender, origin) {
   catch { return false; }
 }
 
+function coreHostPermission(origin) {
+  const url = new URL(origin);
+  return `${url.protocol}//${url.hostname}/*`;
+}
+
 // background.js — Nodecast Extension Service Worker (Fāze 1 + Layout)
 // Sends Capture Package to Nodecast Core API
 // Supports Capture Layout — domain-specific capture types
@@ -186,6 +191,10 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getExtensionStatus') {
     deviceStorage.get(['apiUrl', 'apiToken', 'pairedUsername'], async (settings) => {
+      if (!trustedCoreSender(sender, coreOriginFromApiUrl(settings.apiUrl))) {
+        sendResponse({detected: true, connected: false, username: '', version: chrome.runtime.getManifest().version});
+        return;
+      }
       const connection = await validateCoreConnection(settings);
       sendResponse({
         detected: true,
@@ -213,7 +222,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     chrome.tabs.create({url: chrome.runtime.getURL('pair.html') + '#' + id});
     return true;
   }
-  if (request.action === 'reviewPairing' || request.action === 'approvePairing') {
+  if (['reviewPairing', 'approvePairing', 'rejectPairing'].includes(request.action)) {
     if (sender.url?.split('#')[0] !== chrome.runtime.getURL('pair.html')) return false;
     const pending = pendingPairings.get(request.id);
     if (!pending) {
@@ -226,15 +235,31 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     pendingPairings.delete(request.id);
     clearTimeout(pending.timer);
-    pairWithCore(pending.origin, pending.code).then(result => {
+    const finish = result => {
       pending.respond(result);
       sendResponse(result);
+    };
+    if (request.action === 'rejectPairing') {
+      finish({success: false, message: 'Server access was not granted. Return to Nodecast and connect again.'});
+      return false;
+    }
+    chrome.permissions.contains({origins: [coreHostPermission(pending.origin)]}).then(granted => {
+      if (!granted) return {success: false, message: 'Grant access to this server before connecting.'};
+      return pairWithCore(pending.origin, pending.code);
+    }).then(finish).catch(() => {
+      finish({success: false, message: 'Could not check server access. Return to Nodecast and connect again.'});
     });
     return true;
   }
 
   if (request.action === 'syncExtensionSettings') {
-    syncExtensionSettings().then(sendResponse);
+    deviceStorage.get(['apiUrl']).then(settings => {
+      if (!trustedCoreSender(sender, coreOriginFromApiUrl(settings.apiUrl))) {
+        sendResponse({success: false, message: 'Untrusted Core page'});
+        return;
+      }
+      syncExtensionSettings().then(sendResponse);
+    });
     return true;
   }
 
