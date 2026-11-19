@@ -211,9 +211,15 @@ Commercial licenses for proprietary use are available from the author.
 
 - 🌍 **Website**: [nodecast.dev](https://nodecast.dev)
 - 🔌 **Nodecast server**: [github.com/sarox-dev/Nodecast](https://github.com/sarox-dev/Nodecast)
-- 💬 **Discord**: [Join the community](https://discord.gg/BXEDCJP7mT)
+- 💬 **Discord**: [Join the community](https://discord.gg/tFAM5JST4U)
 
 [license-badge]: https://img.shields.io/badge/License-AGPL--3.0-blue?logo=gnu
 [license-url]: LICENSE
 [version-badge]: https://img.shields.io/badge/Version-1.3.0-orange
 [extension-url]: https://github.com/sarox-dev/Nodecast-Extension
+
+## Connection confirmation
+
+Connect from Nodecast Settings and approve the server address in the extension confirmation tab within 90 seconds. LAN IP addresses and LAN hostnames are supported. Connection credentials are stored on this device and removed from browser sync on upgrade.
+
+The confirmation button requests browser access only for the selected server host. Denying access preserves the previous connection. Status and settings are shared only with the currently connected Core origin; a different Core can still request explicit pairing.

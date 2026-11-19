@@ -11,6 +11,7 @@
     "http://0.0.0.0/*",
     "http://127.0.0.1/*"
   ],
+  "optional_permissions": ["http://*/*", "https://*/*"],
   "action": {"default_popup": "popup.html", "default_title": "Nodecast"},
   "background": {"scripts": ["background.js"]},
   "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"]}],

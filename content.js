@@ -22,7 +22,7 @@ function sendRuntime(message, callback = () => {}) {
 function readExtensionSettings(keys, callback) {
   try {
     if (!extensionAvailable()) { callback(null); return; }
-    chrome.storage.sync.get(keys, settings => {
+    chrome.storage.local.get(keys, settings => {
       const error = chrome.runtime.lastError;
       callback(error ? null : settings);
     });
@@ -48,15 +48,14 @@ sentinel.content = 'installed';
 document.head.appendChild(sentinel);
 
 // --- Core page bridge ---
-// Only Nodecast's loopback workspace can request pairing. Tokens stay in the service worker.
+// Core pages may request pairing; the worker checks the origin and user approval.
+// Tokens stay in the service worker. Status/settings require the paired origin.
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== window.location.origin) return;
   const message = event.data;
   if (!message || message.source !== 'nodecast-core') return;
   const isCorePage = Boolean(document.querySelector('meta[name="nodecast-core"]'));
-  const host = window.location.hostname;
-  const isPrivateIpv4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
-  const isLocalCore = ['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host) || isPrivateIpv4;
+  const isLocalCore = ['http:', 'https:'].includes(window.location.protocol);
   if (!isCorePage || !isLocalCore) return;
 
   const respond = (payload) => window.postMessage({
@@ -118,6 +117,7 @@ function injectSaveButtons(layout) {
     btn.addEventListener('mouseenter', () => { btn.style.background = '#2ea043'; });
     btn.addEventListener('mouseleave', () => { btn.style.background = '#238636'; });
     btn.addEventListener('click', (e) => {
+      if (!e.isTrusted) return;
       e.stopPropagation();
       // If there's a selector, highlight the element
       if (ct.selector) {
@@ -494,6 +494,7 @@ function showSavedWithReason(message, captureId) {
     });
   };
   form.onsubmit = event => {
+    if (!event.isTrusted) return;
     event.preventDefault();
     const button = form.querySelector('button');
     const status = form.querySelector('.status');
@@ -606,9 +607,10 @@ function showFloatingSave(range, pkg) {
       setTimeout(() => { example.textContent = examples[++exampleIndex % examples.length]; example.classList.remove('scroll'); }, 180);
     }
   }, 2800);
-  reasonInput.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); button.click(); } if (event.key === 'Escape') removeFloatingSave(); });
+  reasonInput.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Enter' && event.isTrusted) { event.preventDefault(); saveFloatingCapture(event); } if (event.key === 'Escape') removeFloatingSave(); });
   button.addEventListener('mousedown', event => event.preventDefault());
-  button.addEventListener('click', () => {
+  function saveFloatingCapture(event) {
+    if (!event.isTrusted) return;
     if (!floatingPackage) return;
     button.disabled = true;
     shadow.querySelector('.label').textContent = 'Saving…';
@@ -626,7 +628,8 @@ function showFloatingSave(range, pkg) {
       }
       if (response?.success) setTimeout(removeFloatingSave, 900);
     });
-  });
+  }
+  button.addEventListener('click', saveFloatingCapture);
   document.documentElement.appendChild(floatingHost);
   const buttonRect = floatingHost.getBoundingClientRect();
   const width = Math.max(buttonRect.width, 82);
@@ -674,6 +677,7 @@ window.addEventListener('resize', removeFloatingSave);
 // Build the package synchronously while the browser selection is still alive.
 // Capture phase also prevents page-level shortcut handlers from swallowing it.
 document.addEventListener('keydown', (event) => {
+  if (!event.isTrusted) return;
   if (!(event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyS')) return;
   if (!extensionAvailable()) { notifyReloadRequired(); return; }
 
